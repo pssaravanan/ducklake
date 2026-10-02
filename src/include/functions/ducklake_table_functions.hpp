@@ -106,6 +106,23 @@ public:
 	DuckLakeSetCommitMessage();
 };
 
+class DuckLakeBranchFunctions {
+public:
+	static TableFunction GetCreateBranchFunction();
+	static TableFunction GetDropBranchFunction();
+	static TableFunction GetSetBranchFunction();
+};
+
+class DuckLakeCurrentBranchFunction : public DuckLakeBaseMetadataFunction {
+public:
+	DuckLakeCurrentBranchFunction();
+};
+
+class DuckLakeBranchesFunction : public DuckLakeBaseMetadataFunction {
+public:
+	DuckLakeBranchesFunction();
+};
+
 class DuckLakeOptionsFunction : public DuckLakeBaseMetadataFunction {
 public:
 	DuckLakeOptionsFunction();

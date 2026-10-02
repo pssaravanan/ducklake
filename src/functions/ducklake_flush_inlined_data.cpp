@@ -610,6 +610,24 @@ LEFT JOIN {METADATA_CATALOG}.ducklake_delete_file existing_del
 //===--------------------------------------------------------------------===//
 // Function
 //===--------------------------------------------------------------------===//
+static bool InlinedTableHasRowsAtSnapshot(DuckLakeTransaction &transaction,
+                                          const DuckLakeInlinedTableInfo &inlined_table, optional_idx snapshot_id) {
+	auto &metadata_manager = transaction.GetMetadataManager();
+	auto col_names = metadata_manager.InlinedColNames();
+	auto result = metadata_manager.Query(
+	    StringUtil::Format("SELECT 1 FROM {METADATA_CATALOG}.%s WHERE %s <= %d AND (%s IS NULL OR %s > %d) LIMIT 1",
+	                       inlined_table.table_name, col_names.begin_snapshot, snapshot_id.GetIndex(),
+	                       col_names.end_snapshot, col_names.end_snapshot, snapshot_id.GetIndex()));
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to check inlined data against active branches: ");
+	}
+	for (auto &row : *result) {
+		(void)row;
+		return true;
+	}
+	return false;
+}
+
 static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, TableFunctionBindInput &input,
                                                         TableIndex bind_index, vector<Identifier> &return_names) {
 	input.binder->SetAlwaysRequireRebind();
@@ -617,6 +635,7 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
+	transaction.EnsureNotOnBranch("Flushing inlined data");
 
 	auto &named_parameters = input.named_parameters;
 
@@ -664,6 +683,13 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 		schema_table_map[dl_schema.Cast<DuckLakeSchemaEntry>().GetSchemaId().index].push_back(
 		    table_catalog_entry.get()->Cast<DuckLakeTableEntry>());
 	}
+	// inlined rows an active branch can see at its fork must stay where the branch's deletes point at them
+	optional_idx newest_fork;
+	for (auto &fork_snapshot : DuckLakeBranchManager::GetActiveForkSnapshots(transaction)) {
+		if (!newest_fork.IsValid() || fork_snapshot > newest_fork.GetIndex()) {
+			newest_fork = fork_snapshot;
+		}
+	}
 	// try to compact all tables
 	vector<unique_ptr<LogicalOperator>> flushes;
 	for (auto &schema_table : schema_table_map) {
@@ -676,6 +702,9 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 			auto &table = table_ref.get();
 			auto &inlined_tables = table.GetInlinedDataTables();
 			for (auto &inlined_table : inlined_tables) {
+				if (newest_fork.IsValid() && InlinedTableHasRowsAtSnapshot(transaction, inlined_table, newest_fork)) {
+					continue;
+				}
 				DuckLakeDataFlusher compactor(context, ducklake_catalog, transaction, *input.binder, table.GetTableId(),
 				                              inlined_table);
 				flushes.push_back(compactor.GenerateFlushCommand());

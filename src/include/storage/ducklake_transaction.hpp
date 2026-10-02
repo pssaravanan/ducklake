@@ -18,9 +18,12 @@
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/transaction/transaction.hpp"
+#include "storage/ducklake_branch.hpp"
 #include "storage/ducklake_catalog_set.hpp"
 #include "storage/ducklake_inlined_data.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
+
+#include <thread>
 
 namespace duckdb {
 struct NewMacroInfo;
@@ -116,11 +119,17 @@ public:
 	                            DuckLakeDeleteFile delete_file);
 	void AddDeletes(ClientContext &context, TableIndex table_id, vector<DuckLakeDeleteFile> files);
 	static void AddDeletesToMap(ClientContext &context, vector<DuckLakeDeleteFile> new_deletes,
-	                            unordered_map<string, vector<DuckLakeDeleteFile>> &delete_file_map);
+	                            unordered_map<string, vector<DuckLakeDeleteFile>> &delete_file_map,
+	                            const unordered_set<string> &persisted_files);
+
+	//! Marks a file as written by an earlier branch commit - it is never removed from disk by this transaction
+	void MarkPersisted(const string &path);
+	bool IsPersisted(const string &path) const;
 
 private:
 	mutable mutex lock;
 	map<TableIndex, LocalTableDataChanges> changes;
+	unordered_set<string> persisted_files;
 };
 
 class LocalTableChangeIterationHelper {
@@ -183,6 +192,7 @@ struct DuckLakeRetryConfig {
 class DuckLakeTransaction : public Transaction, public enable_shared_from_this<DuckLakeTransaction> {
 	friend class DuckLakeTransactionState;
 	friend class DuckLakeInitializer;
+	friend class DuckLakeBranchManager;
 
 public:
 	DuckLakeTransaction(DuckLakeCatalog &ducklake_catalog, TransactionManager &manager, ClientContext &context);
@@ -218,6 +228,15 @@ public:
 	DuckLakeSnapshot GetSnapshot();
 	DuckLakeSnapshot GetSnapshot(optional_ptr<BoundAtClause> at_clause,
 	                             SnapshotBound bound = SnapshotBound::UPPER_BOUND);
+
+	//! Makes this transaction read and write the given branch
+	void SetBranch(idx_t branch_id, string branch_name);
+	bool IsOnBranch() const {
+		return branch_id.IsValid();
+	}
+	void EnsureNotOnBranch(const string &operation) const;
+	//! Whether the file was written by an earlier commit on this transaction's branch
+	bool IsPersistedBranchFile(const string &path) const;
 
 	static DuckLakeTransaction &Get(ClientContext &context, Catalog &catalog);
 
@@ -353,6 +372,9 @@ public:
 
 private:
 	void FlushChanges();
+	DuckLakeSnapshot GetBranchSnapshot();
+	void CommitToBranch();
+	void ClearBranchSelection();
 	void FlushNameMapCacheInvalidations();
 	//! Puts back the config options this transaction replaced in the catalog
 	void UndoConfigOptions();
@@ -400,6 +422,18 @@ private:
 	vector<DuckLakeConfigOptionUndo> config_option_undo;
 
 	atomic<idx_t> catalog_version;
+
+	//! The branch this transaction reads and writes (if any)
+	optional_idx branch_id;
+	string branch_name;
+	//! The branch head loaded into the local changes
+	unique_ptr<DuckLakeLoadedBranch> loaded_branch;
+	mutex branch_load_lock;
+	//! The fork snapshot while the branch is being loaded, for re-entrant snapshot lookups
+	unique_ptr<DuckLakeSnapshot> branch_fork_snapshot;
+	std::thread::id branch_loading_thread;
+	//! The table of each main data file dropped by this transaction
+	map<idx_t, TableIndex> dropped_file_tables;
 };
 
 } // namespace duckdb

@@ -2585,6 +2585,10 @@ vector<DuckLakeCompactionFileEntry> DuckLakeMetadataManager::GetFilesForCompacti
 
 	// Add file filtering for MERGE_ADJACENT_TABLES compaction
 	if (type == CompactionType::MERGE_ADJACENT_TABLES) {
+		if (DuckLakeBranchManager::HasBranchTables(transaction)) {
+			// merging removes the source files - keep every file an active branch can still see at its fork
+			file_filter_clause += " AND data.begin_snapshot > (" + DuckLakeBranchManager::NewestActiveForkQuery() + ")";
+		}
 		if (options.min_file_size.IsValid()) {
 			file_filter_clause +=
 			    StringUtil::Format(" AND data.file_size_bytes >= %llu", options.min_file_size.GetIndex());
@@ -5533,6 +5537,16 @@ vector<DuckLakeFileForCleanup> DuckLakeMetadataManager::GetOrphanFilesForCleanup
 	for (auto &row : *known_files_res) {
 		known_files.insert(canonical_path(row.GetValue<string>(0)));
 	}
+	if (DuckLakeBranchManager::HasBranchTables(transaction)) {
+		// files written on active branches are not listed in the main file tables
+		auto branch_files_res = Query(DuckLakeBranchManager::ActiveBranchFilesQuery());
+		if (branch_files_res->HasError()) {
+			branch_files_res->GetErrorObject().Throw("Failed to get branch files from DuckLake: ");
+		}
+		for (auto &row : *branch_files_res) {
+			known_files.insert(canonical_path(StringUtil::Replace(row.GetValue<string>(0), "\\", "/")));
+		}
+	}
 
 	auto query = StringUtil::Format(R"(SELECT filename
 FROM read_blob({DATA_PATH} || '**') files
@@ -5711,13 +5725,22 @@ void DuckLakeMetadataManager::DeleteSnapshots(const vector<DuckLakeSnapshotInfo>
 	// expiring deletes inlined rows by their snapshot columns so the catalog version must be current
 	GetSnapshot();
 	unique_ptr<QueryResult> result;
+	// a branch may have forked from one of these snapshots since they were selected
+	auto active_forks = DuckLakeBranchManager::GetActiveForkSnapshots(transaction);
+	set<idx_t> pinned_snapshots(active_forks.begin(), active_forks.end());
 	// first delete the actual snapshots
 	string snapshot_ids;
 	for (auto &snapshot : snapshots) {
+		if (pinned_snapshots.find(snapshot.id) != pinned_snapshots.end()) {
+			continue;
+		}
 		if (!snapshot_ids.empty()) {
 			snapshot_ids += ", ";
 		}
 		snapshot_ids += to_string(snapshot.id);
+	}
+	if (snapshot_ids.empty()) {
+		return;
 	}
 
 	vector<TableIndex> stats_table_ids;

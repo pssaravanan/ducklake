@@ -1,6 +1,8 @@
 add_subdirectory(statistics)
 add_library(
   ducklake_storage OBJECT
+  ducklake_branch.cpp
+  ducklake_branch_parser.cpp
   ducklake_catalog.cpp
   ducklake_checkpoint.cpp
   ducklake_default_functions.cpp

@@ -199,6 +199,12 @@ private:
 	                              const DuckLakeFileListExtendedEntry &data_file_info,
 	                              DuckLakeDeleteData &existing_delete_data, const set<idx_t> &sorted_deletes,
 	                              DuckLakeDeleteFile &delete_file) const;
+	//! Writes a delete on a main data file from a branch: the result holds main's deletes at the fork plus the
+	//! branch's deletes, so it stays correct whatever main does to its own delete files later
+	void FlushBranchDelete(DuckLakeTransaction &transaction, ClientContext &context,
+	                       DuckLakeDeleteGlobalState &global_state, const string &filename,
+	                       const DuckLakeFileListExtendedEntry &data_file_info, set<idx_t> deletes,
+	                       DuckLakeDeleteFile &delete_file) const;
 	//! Try to drop a file if all rows are deleted. Returns true if the file was dropped.
 	bool TryDropFullyDeletedFile(DuckLakeTransaction &transaction, const DuckLakeDeleteFile &delete_file,
 	                             const DuckLakeFileListExtendedEntry &data_file_info, idx_t delete_count) const;

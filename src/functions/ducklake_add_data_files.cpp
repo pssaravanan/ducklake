@@ -1403,6 +1403,7 @@ static void DuckLakeAddDataFilesExecute(ClientContext &context, TableFunctionInp
 	auto &state = data_p.global_state->Cast<DuckLakeAddDataFilesState>();
 	auto &bind_data = data_p.bind_data->Cast<DuckLakeAddDataFilesData>();
 	auto &transaction = DuckLakeTransaction::Get(context, bind_data.catalog);
+	transaction.EnsureNotOnBranch("Adding data files");
 
 	if (state.finished) {
 		return;

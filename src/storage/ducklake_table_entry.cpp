@@ -472,7 +472,7 @@ shared_ptr<DuckLakeTableStats> DuckLakeTableEntry::GetTableStats(ClientContext &
 }
 
 bool DuckLakeTableEntry::CanUseGlobalStats(DuckLakeTransaction &transaction) const {
-	return !IsTransactionLocal() && !transaction.HasTransactionLocalInserts(GetTableId());
+	return !IsTransactionLocal() && !transaction.IsOnBranch() && !transaction.HasTransactionLocalInserts(GetTableId());
 }
 
 shared_ptr<DuckLakeTableStats> DuckLakeTableEntry::GetTableStats(DuckLakeTransaction &transaction) {
