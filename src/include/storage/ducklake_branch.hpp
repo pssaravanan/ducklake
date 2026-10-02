@@ -77,8 +77,10 @@ public:
 	static constexpr idx_t BRANCH_FILE_ID_BASE = idx_t(1) << 62;
 	static constexpr const char *MAIN_BRANCH_NAME = "main";
 
-	//! Creates the branch metadata tables on a read-write attach and reports whether they exist
-	static bool InitializeTables(DuckLakeTransaction &transaction, bool read_only);
+	//! Whether the branch metadata tables exist - probed again while they are absent
+	static bool HasBranchTables(DuckLakeTransaction &transaction);
+	//! Creates the branch metadata tables if needed; returns whether this call created them
+	static bool CreateTables(DuckLakeTransaction &transaction);
 
 	static unique_ptr<DuckLakeBranchInfo> GetBranch(DuckLakeTransaction &transaction, idx_t branch_id);
 	static unique_ptr<DuckLakeBranchInfo> GetActiveBranch(DuckLakeTransaction &transaction, const string &name);

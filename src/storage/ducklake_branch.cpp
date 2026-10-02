@@ -1,6 +1,7 @@
 #include "storage/ducklake_branch.hpp"
 
 #include "common/ducklake_util.hpp"
+#include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
@@ -58,20 +59,8 @@ static unique_ptr<QueryResult> RunBranchQuery(DuckLakeTransaction &transaction, 
 	return result;
 }
 
-static void EnsureBranchTables(DuckLakeTransaction &transaction) {
-	if (!transaction.GetCatalog().HasBranchTables()) {
-		throw InvalidInputException("Branches are not available on DuckLake \"%s\" - attach it read-write once to "
-		                            "create the branch metadata tables",
-		                            transaction.GetCatalog().GetName().GetIdentifierName());
-	}
-}
-
 static string OptionalToSQL(const optional_idx &value) {
 	return value.IsValid() ? to_string(value.GetIndex()) : "NULL";
-}
-
-static string StringToSQL(const string &value) {
-	return value.empty() ? "NULL" : DuckLakeUtil::SQLLiteralToString(value);
 }
 
 static string LoadBranchPath(DuckLakeCatalog &catalog, const string &base_path, const string &path, bool relative) {
@@ -91,7 +80,9 @@ static optional_idx OptionalIndex(const Value &value) {
 }
 
 static vector<DuckLakeBranchInfo> ReadBranches(DuckLakeTransaction &transaction, const string &filter) {
-	EnsureBranchTables(transaction);
+	if (!DuckLakeBranchManager::HasBranchTables(transaction)) {
+		return vector<DuckLakeBranchInfo>();
+	}
 	auto result = RunBranchQuery(transaction,
 	                             "SELECT branch_id, branch_name, fork_snapshot_id, head_seq, next_file_seq, status, "
 	                             "created_at FROM {METADATA_CATALOG}.ducklake_branching_branch WHERE " +
@@ -127,18 +118,28 @@ CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_branching_inlined_delete(
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_branching_dropped_file(branch_id BIGINT, begin_seq BIGINT, table_id BIGINT, data_file_id BIGINT);
 )";
 
-bool DuckLakeBranchManager::InitializeTables(DuckLakeTransaction &transaction, bool read_only) {
-	auto probe = transaction.Query("SELECT NULL FROM {METADATA_CATALOG}.ducklake_branching_branch LIMIT 1");
-	if (!probe->HasError()) {
+bool DuckLakeBranchManager::HasBranchTables(DuckLakeTransaction &transaction) {
+	auto &catalog = transaction.GetCatalog();
+	if (catalog.HasBranchTables()) {
 		return true;
 	}
-	if (probe->GetErrorObject().Type() != ExceptionType::CATALOG) {
+	auto probe = transaction.Query("SELECT NULL FROM {METADATA_CATALOG}.ducklake_branching_branch LIMIT 1");
+	if (probe->HasError()) {
+		if (probe->GetErrorObject().Type() == ExceptionType::CATALOG) {
+			return false;
+		}
 		probe->GetErrorObject().Throw("Failed to probe DuckLake branch tables: ");
 	}
-	if (read_only) {
+	catalog.SetHasBranchTables(true);
+	return true;
+}
+
+bool DuckLakeBranchManager::CreateTables(DuckLakeTransaction &transaction) {
+	if (HasBranchTables(transaction)) {
 		return false;
 	}
 	RunBranchQuery(transaction, BRANCH_TABLES_SQL, "Failed to create DuckLake branch tables: ");
+	transaction.GetCatalog().SetHasBranchTables(true);
 	return true;
 }
 
@@ -184,7 +185,7 @@ vector<DuckLakeBranchInfo> DuckLakeBranchManager::GetBranches(DuckLakeTransactio
 
 DuckLakeBranchInfo DuckLakeBranchManager::CreateBranch(DuckLakeTransaction &transaction, const string &name) {
 	ValidateBranchName(name);
-	EnsureBranchTables(transaction);
+	auto created_tables = CreateTables(transaction);
 	if (GetActiveBranch(transaction, name)) {
 		throw InvalidInputException("Branch \"%s\" already exists", name);
 	}
@@ -206,6 +207,10 @@ DuckLakeBranchInfo DuckLakeBranchManager::CreateBranch(DuckLakeTransaction &tran
 	    "INSERT INTO {METADATA_CATALOG}.ducklake_branching_branch VALUES (%d, %s, %d, 0, 0, 'active', NOW());",
 	    name_literal, info.branch_id, info.branch_id, name_literal, info.fork_snapshot_id));
 	if (result->HasError()) {
+		if (created_tables) {
+			// the tables are rolled back with this transaction
+			transaction.GetCatalog().SetHasBranchTables(false);
+		}
 		result->GetErrorObject().Throw(
 		    StringUtil::Format("Failed to create branch \"%s\" - another branch may have been created concurrently, "
 		                       "retry: ",
@@ -216,6 +221,20 @@ DuckLakeBranchInfo DuckLakeBranchManager::CreateBranch(DuckLakeTransaction &tran
 
 void DuckLakeBranchManager::DropBranch(DuckLakeTransaction &transaction, const DuckLakeBranchInfo &branch) {
 	auto id = branch.branch_id;
+	// marking the branch dropped first locks its row, so a branch commit in flight fails instead of adding rows
+	auto update_result = RunBranchQuery(
+	    transaction,
+	    StringUtil::Format("UPDATE {METADATA_CATALOG}.ducklake_branching_branch SET status = 'dropped' WHERE "
+	                       "branch_id = %d AND status = 'active'",
+	                       id),
+	    "Failed to drop DuckLake branch: ");
+	idx_t updated_rows = 0;
+	for (auto &row : *update_result) {
+		updated_rows = row.GetValue<idx_t>(0);
+	}
+	if (updated_rows != 1) {
+		throw TransactionException("Branch \"%s\" was changed or dropped by another transaction - retry", branch.name);
+	}
 	string query = StringUtil::Format(R"(
 INSERT INTO {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion
 SELECT branch_file_id, path, path_is_relative, NOW() FROM {METADATA_CATALOG}.ducklake_branching_data_file WHERE branch_id = %d
@@ -229,12 +248,11 @@ SELECT branch_file_id, path, path_is_relative, NOW() FROM {METADATA_CATALOG}.duc
 	                              "ducklake_branching_file_partition_value",
 	                              "ducklake_branching_inlined_delete",
 	                              "ducklake_branching_dropped_file",
+	                              "ducklake_branching_commit",
 	                              "ducklake_branching_name"};
 	for (auto &table : branch_tables) {
 		query += StringUtil::Format("DELETE FROM {METADATA_CATALOG}.%s WHERE branch_id = %d;\n", table, id);
 	}
-	query += StringUtil::Format(
-	    "UPDATE {METADATA_CATALOG}.ducklake_branching_branch SET status = 'dropped' WHERE branch_id = %d;", id);
 	RunBranchQuery(transaction, std::move(query), "Failed to drop DuckLake branch: ");
 }
 
@@ -306,7 +324,7 @@ static DuckLakeDeleteFile ReadDeleteFileRow(DuckLakeCatalog &catalog, const vect
 	delete_file.file_size_bytes = row[8].GetValue<idx_t>();
 	delete_file.footer_size = row[9].IsNull() ? 0 : row[9].GetValue<idx_t>();
 	delete_file.row_group_count = OptionalIndex(row[10]);
-	delete_file.encryption_key = row[11].IsNull() ? string() : row[11].GetValue<string>();
+	delete_file.encryption_key = row[11].IsNull() ? string() : Blob::FromBase64(row[11].GetValue<string>());
 	return delete_file;
 }
 
@@ -340,7 +358,7 @@ void DuckLakeBranchManager::LoadBranch(DuckLakeTransaction &transaction, const D
 		file.row_group_count = OptionalIndex(row.GetBaseValue(7));
 		file.partition_id = OptionalIndex(row.GetBaseValue(8));
 		auto encryption_key = row.GetBaseValue(9);
-		file.encryption_key = encryption_key.IsNull() ? string() : encryption_key.GetValue<string>();
+		file.encryption_key = encryption_key.IsNull() ? string() : Blob::FromBase64(encryption_key.GetValue<string>());
 		loaded.data_files[file.file_name] = file_id;
 		auto &table_files = files_per_table[table_id];
 		file_positions[file_id] = make_pair(table_id, table_files.size());
@@ -468,7 +486,8 @@ static string DeleteFileValues(DuckLakeMetadataManager &metadata_manager, idx_t 
 	                          DuckLakeUtil::SQLLiteralToString(path.path), path.path_is_relative ? "true" : "false",
 	                          DuckLakeUtil::SQLLiteralToString(DeleteFileFormatToString(delete_file.format)),
 	                          delete_file.delete_count, delete_file.file_size_bytes, delete_file.footer_size,
-	                          OptionalToSQL(delete_file.row_group_count), StringToSQL(delete_file.encryption_key));
+	                          OptionalToSQL(delete_file.row_group_count),
+	                          DuckLakeUtil::EncryptionKeyLiteral(delete_file.encryption_key));
 }
 
 static void AppendValues(string &target, const string &values) {
@@ -517,13 +536,14 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 				file_id = next_file_id();
 				inserted_tables.insert(table_id);
 				auto path = metadata_manager.GetRelativePath(file.file_name);
-				AppendValues(
-				    data_rows,
-				    StringUtil::Format("(%d, %d, %d, %d, NULL, %s, %s, 'parquet', %d, %d, %s, %s, %s, %s)", file_id,
-				                       branch_id, table_id.index, new_seq, DuckLakeUtil::SQLLiteralToString(path.path),
-				                       path.path_is_relative ? "true" : "false", file.row_count, file.file_size_bytes,
-				                       OptionalToSQL(file.footer_size), OptionalToSQL(file.row_group_count),
-				                       OptionalToSQL(file.partition_id), StringToSQL(file.encryption_key)));
+				AppendValues(data_rows,
+				             StringUtil::Format("(%d, %d, %d, %d, NULL, %s, %s, 'parquet', %d, %d, %s, %s, %s, %s)",
+				                                file_id, branch_id, table_id.index, new_seq,
+				                                DuckLakeUtil::SQLLiteralToString(path.path),
+				                                path.path_is_relative ? "true" : "false", file.row_count,
+				                                file.file_size_bytes, OptionalToSQL(file.footer_size),
+				                                OptionalToSQL(file.row_group_count), OptionalToSQL(file.partition_id),
+				                                DuckLakeUtil::EncryptionKeyLiteral(file.encryption_key)));
 				for (auto &stats_entry : file.column_stats) {
 					auto stats = DuckLakeColumnStatsInfo::FromColumnStats(stats_entry.first, stats_entry.second);
 					AppendValues(stats_rows,
@@ -553,6 +573,10 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 			}
 		}
 		for (auto &delete_entry : changes.new_delete_files) {
+			if (state.dropped_files.find(delete_entry.first) != state.dropped_files.end()) {
+				// the main file was fully deleted on the branch - its delete files go with it
+				continue;
+			}
 			for (auto &delete_file : delete_entry.second) {
 				current_delete_files.insert(delete_file.file_name);
 				if (loaded.delete_files.find(delete_file.file_name) != loaded.delete_files.end()) {
@@ -646,9 +670,11 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 			}
 			id_list += to_string(id);
 		}
-		batch += StringUtil::Format("UPDATE {METADATA_CATALOG}.ducklake_branching_delete_file SET end_seq = %d WHERE "
-		                            "branch_file_id IN (%s);\n",
-		                            new_seq, id_list);
+		batch += StringUtil::Format(
+		    "INSERT INTO {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion SELECT branch_file_id, path, "
+		    "path_is_relative, NOW() FROM {METADATA_CATALOG}.ducklake_branching_delete_file WHERE branch_file_id IN "
+		    "(%s);\nDELETE FROM {METADATA_CATALOG}.ducklake_branching_delete_file WHERE branch_file_id IN (%s);\n",
+		    id_list, id_list);
 	}
 	if (!inlined_rows.empty()) {
 		batch += "INSERT INTO {METADATA_CATALOG}.ducklake_branching_inlined_delete VALUES " + inlined_rows + ";\n";
@@ -657,8 +683,9 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 		batch += "INSERT INTO {METADATA_CATALOG}.ducklake_branching_dropped_file VALUES " + dropped_rows + ";\n";
 	}
 
+	// status is written as well: DuckDB detects update conflicts per column, and DROP BRANCH changes status
 	auto advance_head = StringUtil::Format("UPDATE {METADATA_CATALOG}.ducklake_branching_branch SET head_seq = %d, "
-	                                       "next_file_seq = %d WHERE branch_id = %d "
+	                                       "next_file_seq = %d, status = 'active' WHERE branch_id = %d "
 	                                       "AND head_seq = %d AND status = 'active'",
 	                                       new_seq, next_file_seq, branch_id, loaded.info.head_seq);
 	auto changed_error =
@@ -738,7 +765,7 @@ WHERE b.status = 'active')";
 
 vector<idx_t> DuckLakeBranchManager::GetActiveForkSnapshots(DuckLakeTransaction &transaction) {
 	vector<idx_t> result;
-	if (!transaction.GetCatalog().HasBranchTables()) {
+	if (!HasBranchTables(transaction)) {
 		return result;
 	}
 	auto query_result =

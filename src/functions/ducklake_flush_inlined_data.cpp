@@ -615,8 +615,9 @@ static bool InlinedTableHasRowsAtSnapshot(DuckLakeTransaction &transaction,
 	auto &metadata_manager = transaction.GetMetadataManager();
 	auto col_names = metadata_manager.InlinedColNames();
 	auto result = metadata_manager.Query(
-	    StringUtil::Format("SELECT 1 FROM {METADATA_CATALOG}.%s WHERE %s <= %d LIMIT 1", inlined_table.table_name,
-	                       col_names.begin_snapshot, snapshot_id.GetIndex()));
+	    StringUtil::Format("SELECT 1 FROM {METADATA_CATALOG}.%s WHERE %s <= %d AND (%s IS NULL OR %s > %d) LIMIT 1",
+	                       inlined_table.table_name, col_names.begin_snapshot, snapshot_id.GetIndex(),
+	                       col_names.end_snapshot, col_names.end_snapshot, snapshot_id.GetIndex()));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to check inlined data against active branches: ");
 	}

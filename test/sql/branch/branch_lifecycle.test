@@ -161,3 +161,22 @@ query I
 FROM ducklake_current_branch('ducklake')
 ----
 main
+
+# a lake without branch metadata has no branches until the first one is created
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+0
+
+statement ok
+USE ducklake
+
+statement error
+SET BRANCH c
+----
+does not exist
+
+query II
+CREATE BRANCH c
+----
+c	0

@@ -2585,7 +2585,7 @@ vector<DuckLakeCompactionFileEntry> DuckLakeMetadataManager::GetFilesForCompacti
 
 	// Add file filtering for MERGE_ADJACENT_TABLES compaction
 	if (type == CompactionType::MERGE_ADJACENT_TABLES) {
-		if (transaction.GetCatalog().HasBranchTables()) {
+		if (DuckLakeBranchManager::HasBranchTables(transaction)) {
 			// merging removes the source files - keep every file an active branch can still see at its fork
 			file_filter_clause += " AND data.begin_snapshot > (" + DuckLakeBranchManager::NewestActiveForkQuery() + ")";
 		}
@@ -5537,7 +5537,7 @@ vector<DuckLakeFileForCleanup> DuckLakeMetadataManager::GetOrphanFilesForCleanup
 	for (auto &row : *known_files_res) {
 		known_files.insert(canonical_path(row.GetValue<string>(0)));
 	}
-	if (transaction.GetCatalog().HasBranchTables()) {
+	if (DuckLakeBranchManager::HasBranchTables(transaction)) {
 		// files written on active branches are not listed in the main file tables
 		auto branch_files_res = Query(DuckLakeBranchManager::ActiveBranchFilesQuery());
 		if (branch_files_res->HasError()) {

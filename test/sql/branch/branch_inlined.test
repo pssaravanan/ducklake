@@ -30,6 +30,16 @@ DELETE FROM t WHERE i = 0
 statement ok
 INSERT INTO t VALUES (100), (101), (102)
 
+# inlined rows deleted on main before the fork do not keep their table from being flushed
+statement ok
+CREATE TABLE u(i INTEGER)
+
+statement ok
+INSERT INTO u VALUES (1), (2)
+
+statement ok
+DELETE FROM u
+
 statement ok
 CREATE BRANCH b
 
@@ -63,8 +73,10 @@ SELECT COUNT(*) FROM ducklake_meta.ducklake_inlined_data_1_1
 ----
 3
 
-statement ok
-CALL ducklake_flush_inlined_data('ducklake')
+query I
+SELECT table_name FROM ducklake_flush_inlined_data('ducklake') ORDER BY table_name
+----
+u
 
 query I
 SELECT COUNT(*) FROM ducklake_meta.ducklake_inlined_data_1_1

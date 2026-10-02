@@ -68,6 +68,26 @@ SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_delete_file WHERE end_seq 
 ----
 1
 
+# the superseded delete files are scheduled for deletion, like main's overwritten delete files
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion WHERE data_file_id >= 4611686018427387904
+----
+2
+
+statement ok
+SET BRANCH main
+
+statement ok
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true)
+
+statement ok
+SET BRANCH b
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+6	36
+
 statement ok
 SET BRANCH main
 
@@ -117,6 +137,12 @@ query I
 SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_dropped_file
 ----
 1
+
+# the delete file the branch had on that main file went with it
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_delete_file WHERE target_data_file_id IS NOT NULL
+----
+0
 
 statement ok
 USE memory
