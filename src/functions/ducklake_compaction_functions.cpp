@@ -842,6 +842,7 @@ unique_ptr<LogicalOperator> BindCompaction(ClientContext &context, TableFunction
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
+	transaction.EnsureNotOnBranch("Compaction");
 	string schema, table;
 	vector<unique_ptr<LogicalOperator>> compactions;
 	uint64_t max_files = NumericLimits<uint64_t>::Maximum() - 1;

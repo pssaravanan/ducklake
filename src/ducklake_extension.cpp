@@ -12,6 +12,7 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 #include "storage/ducklake_log_type.hpp"
+#include "storage/ducklake_branch_parser.hpp"
 
 namespace duckdb {
 
@@ -88,6 +89,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	DuckLakeSetCommitMessage set_commit_message;
 	loader.RegisterFunction(set_commit_message);
+
+	loader.RegisterFunction(DuckLakeBranchFunctions::GetCreateBranchFunction());
+	loader.RegisterFunction(DuckLakeBranchFunctions::GetDropBranchFunction());
+	loader.RegisterFunction(DuckLakeBranchFunctions::GetSetBranchFunction());
+	DuckLakeCurrentBranchFunction current_branch;
+	loader.RegisterFunction(current_branch);
+	DuckLakeBranchesFunction branches;
+	loader.RegisterFunction(branches);
+	ParserExtension::Register(config, DuckLakeBranchParserExtension());
 
 	auto table_changes = DuckLakeTableInsertionsFunction::GetDuckLakeTableChanges();
 	loader.RegisterFunction(*table_changes);

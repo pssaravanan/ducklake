@@ -130,6 +130,8 @@ void DuckLakeInitializer::Initialize() {
 	// probe the metadata server for optional capabilities (e.g. server-side commit retries) once per attach
 	current_metadata_manager.ProbeServerCapabilities();
 	current_metadata_manager.ClearCache();
+	auto read_only = catalog.GetAttached().IsReadOnly() || options.access_mode == AccessMode::READ_ONLY;
+	catalog.SetHasBranchTables(DuckLakeBranchManager::InitializeTables(transaction, read_only));
 	if (options.at_clause) {
 		// if the user specified a snapshot try to load it to trigger an error if it does not exist
 		transaction.GetSnapshot();

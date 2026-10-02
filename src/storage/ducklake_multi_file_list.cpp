@@ -649,6 +649,11 @@ void DuckLakeMultiFileList::GetFilesForTable() const {
 	// if the transaction has any local deletes - apply them to the file list
 	if (transaction.HasLocalDeletes(read_info.table_id)) {
 		for (auto &file_entry : files) {
+			if (transaction.IsOnBranch() &&
+			    transaction.HasLocalDeleteForFile(read_info.table_id, file_entry.file.path)) {
+				// a branch's delete file already holds main's inlined deletions at the fork
+				file_entry.inlined_file_deletions.clear();
+			}
 			transaction.GetLocalDeleteForFile(read_info.table_id, file_entry.file.path, file_entry.delete_file);
 		}
 	}

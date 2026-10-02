@@ -1279,6 +1279,10 @@ idx_t DuckLakeCatalog::GetInliningLimit(ClientContext &context, SchemaIndex sche
 		return 0;
 	}
 	auto &transaction = DuckLakeTransaction::Get(context, *this);
+	if (transaction.IsOnBranch()) {
+		// branch changes are always written to files
+		return 0;
+	}
 	auto &metadata_manager = transaction.GetMetadataManager();
 	if (!metadata_manager.CanInlineColumns(columns)) {
 		return 0;

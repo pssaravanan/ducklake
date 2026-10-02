@@ -97,6 +97,7 @@ static unique_ptr<FunctionData> CleanupBind(ClientContext &context, TableFunctio
 	}
 
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
+	transaction.EnsureNotOnBranch("File cleanup");
 	auto &metadata_manager = transaction.GetMetadataManager();
 	result->files = metadata_manager.GetFilesForCleanup(result->GetFilter(), type, ducklake_catalog.Separator());
 

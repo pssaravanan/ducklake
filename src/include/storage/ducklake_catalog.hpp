@@ -155,6 +155,13 @@ public:
 	bool IsInitialized() const {
 		return initialized;
 	}
+	//! Whether the branch metadata tables exist in the metadata catalog
+	bool HasBranchTables() const {
+		return has_branch_tables;
+	}
+	void SetHasBranchTables(bool value) {
+		has_branch_tables = value;
+	}
 	idx_t DataInliningRowLimit(ClientContext &context, SchemaIndex schema_index, TableIndex table_index,
 	                           optional_ptr<const map<string, string>> table_options = nullptr) const;
 	//! Returns the inlining limit (0 if the table is not eligible)
@@ -392,6 +399,7 @@ private:
 	string instance_id;
 	//! Whether or not the catalog is initialized
 	bool initialized = false;
+	atomic<bool> has_branch_tables {false};
 	//! Whether or not the metadata server can execute the commit retry loop server-side.
 	bool retrials_server_side = false;
 	//! Cache for inlined deletion table existence checks

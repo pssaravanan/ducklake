@@ -419,9 +419,66 @@ bool DuckLakeDelete::TryDropFullyDeletedFile(DuckLakeTransaction &transaction, c
 		transaction.DropFile(table.GetTableId(), delete_file.data_file_id, data_file_info.file.path,
 		                     data_file_info.row_count, data_file_info.file.file_size_bytes);
 	} else {
+		if (transaction.IsPersistedBranchFile(data_file_info.file.path)) {
+			// keep files of earlier branch commits in place so the row ids of later files do not shift
+			return false;
+		}
 		transaction.DropTransactionLocalFile(table.GetTableId(), data_file_info.file.path);
 	}
 	return true;
+}
+
+void DuckLakeDelete::FlushBranchDelete(DuckLakeTransaction &transaction, ClientContext &context,
+                                       DuckLakeDeleteGlobalState &global_state, const string &filename,
+                                       const DuckLakeFileListExtendedEntry &data_file_info, set<idx_t> deletes,
+                                       DuckLakeDeleteFile &delete_file) const {
+	auto table_id = table.GetTableId();
+	auto fork_snapshot = transaction.GetSnapshot();
+	auto has_branch_delete = transaction.HasLocalDeleteForFile(table_id, filename);
+	auto existing_delete_data = delete_map->GetDeleteData(filename);
+	if (existing_delete_data) {
+		if (has_branch_delete) {
+			// the branch's own delete file already holds everything deleted on the branch
+			deletes.insert(existing_delete_data->deleted_rows.begin(), existing_delete_data->deleted_rows.end());
+		} else {
+			// main's delete file can hold deletes made after the fork - keep only the ones visible at the fork
+			idx_t fallback_snapshot = 0;
+			if (!existing_delete_data->HasEmbeddedSnapshots() && data_file_info.delete_file_begin_snapshot.IsValid()) {
+				fallback_snapshot = data_file_info.delete_file_begin_snapshot.GetIndex();
+			}
+			set<PositionWithSnapshot> existing_deletes;
+			MergeDeletesWithSnapshots(*existing_delete_data, fallback_snapshot, existing_deletes);
+			for (auto &entry : existing_deletes) {
+				if (static_cast<idx_t>(entry.snapshot_id) <= fork_snapshot.snapshot_id) {
+					deletes.insert(static_cast<idx_t>(entry.position));
+				}
+			}
+		}
+		delete_map->ClearDeletes(filename);
+		delete_file.overwrites_existing_delete = true;
+	}
+	if (!has_branch_delete) {
+		// main's inlined file deletions are not part of its delete file
+		auto &metadata_manager = transaction.GetMetadataManager();
+		auto inlined_deletes = metadata_manager.ReadInlinedFileDeletions(table_id, fork_snapshot);
+		auto entry = inlined_deletes.find(data_file_info.file_id.index);
+		if (entry != inlined_deletes.end()) {
+			deletes.insert(entry->second.begin(), entry->second.end());
+		}
+	}
+	if (TryDropFullyDeletedFile(transaction, delete_file, data_file_info, deletes.size())) {
+		return;
+	}
+	auto &fs = FileSystem::GetFileSystem(context);
+	auto &catalog = table.catalog.Cast<DuckLakeCatalog>();
+	auto &schema = table.ParentSchema().Cast<DuckLakeSchemaEntry>();
+	bool use_deletion_vectors = catalog.WriteDeletionVectors(schema.GetSchemaId(), table_id, &table.GetTableOptions());
+	WriteDeleteFileInput input {context,        transaction, fs,      table.DataPath(),
+	                            encryption_key, filename,    deletes, DeleteFileSource::REGULAR};
+	auto written_file = DuckLakeDeleteFileWriter::Write(context, input, use_deletion_vectors);
+	written_file.data_file_id = delete_file.data_file_id;
+	written_file.overwrites_existing_delete = delete_file.overwrites_existing_delete;
+	global_state.written_files.emplace(filename, std::move(written_file));
 }
 
 void DuckLakeDelete::FlushDeleteWithSnapshots(DuckLakeTransaction &transaction, ClientContext &context,
@@ -521,6 +578,11 @@ void DuckLakeDelete::FlushDelete(DuckLakeTransaction &transaction, ClientContext
 	DuckLakeDeleteFile delete_file;
 	delete_file.data_file_path = filename;
 	delete_file.data_file_id = data_file_info.file_id;
+	if (transaction.IsOnBranch() && data_file_info.file_id.IsValid()) {
+		FlushBranchDelete(transaction, context, global_state, filename, data_file_info, std::move(sorted_deletes),
+		                  delete_file);
+		return;
+	}
 	// check if the file already has deletes
 	auto existing_delete_data = delete_map->GetDeleteData(filename);
 
