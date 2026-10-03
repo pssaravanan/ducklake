@@ -93,6 +93,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetCreateBranchFunction());
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetDropBranchFunction());
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetSetBranchFunction());
+	loader.RegisterFunction(DuckLakeBranchFunctions::GetMergeBranchFunction());
 	DuckLakeCurrentBranchFunction current_branch;
 	loader.RegisterFunction(current_branch);
 	DuckLakeBranchesFunction branches;

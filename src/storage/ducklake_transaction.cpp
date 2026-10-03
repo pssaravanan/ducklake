@@ -207,6 +207,37 @@ void LocalTableChanges::DropTransactionLocalFile(ClientContext &context, TableIn
 	throw InternalException("Failed to find matching transaction-local file for DropTransactionLocalFile");
 }
 
+void LocalTableChanges::ForgetFile(TableIndex table_id, const string &path) {
+	lock_guard<mutex> guard(lock);
+	auto entry = changes.find(table_id);
+	if (entry == changes.end()) {
+		throw InternalException("ForgetFile called for a table without transaction-local files");
+	}
+	auto &table_files = entry->second.new_data_files;
+	for (idx_t i = 0; i < table_files.size(); i++) {
+		if (table_files[i].file_name == path) {
+			table_files.erase_at(i);
+			if (entry->second.IsEmpty()) {
+				changes.erase(entry);
+			}
+			return;
+		}
+	}
+	throw InternalException("ForgetFile could not find the transaction-local file");
+}
+
+void LocalTableChanges::ForgetDeleteFiles(TableIndex table_id, const string &data_file_path) {
+	lock_guard<mutex> guard(lock);
+	auto entry = changes.find(table_id);
+	if (entry == changes.end()) {
+		return;
+	}
+	entry->second.new_delete_files.erase(data_file_path);
+	if (entry->second.IsEmpty()) {
+		changes.erase(entry);
+	}
+}
+
 void LocalTableChanges::AppendFiles(TableIndex table_id, vector<DuckLakeDataFile> files) {
 	lock_guard<mutex> guard(lock);
 	auto &table_changes = changes[table_id];
@@ -812,6 +843,8 @@ void DuckLakeTransaction::Commit() {
 	try {
 		if (IsOnBranch()) {
 			CommitToBranch();
+		} else if (merge_state) {
+			CommitMerge();
 		} else if (ChangesMade()) {
 			FlushChanges();
 		} else if (connection) {
@@ -828,6 +861,7 @@ void DuckLakeTransaction::Commit() {
 	FlushNameMapCacheInvalidations();
 	connection.reset();
 	state->local_changes.Clear();
+	merge_state.reset();
 	config_option_undo.clear();
 	SetRequiresNewInlinedTable(false);
 	ClearSchemaCachePins();
@@ -842,6 +876,7 @@ void DuckLakeTransaction::Rollback() {
 	}
 	state->CleanupFiles();
 	state->local_changes.Clear();
+	merge_state.reset();
 	pending_name_map_cache_invalidations.clear();
 	SetRequiresNewInlinedTable(false);
 	ClearSchemaCachePins();
@@ -1490,9 +1525,33 @@ void DuckLakeTransaction::DropEmptySupersededInlinedTablesClientSide() {
 	DuckLakeTransactionState::DropEmptySupersededInlinedTables(context);
 }
 
+void DuckLakeTransaction::SetBranchMerge(unique_ptr<DuckLakeBranchMerge> merge) {
+	merge_state = std::move(merge);
+}
+
+void DuckLakeTransaction::CommitMerge() {
+	auto &merge = *merge_state;
+	if (ChangesMade()) {
+		auto retry_config = DuckLakeRetryConfig::FromContext(*context.lock());
+		auto transaction_changes = GetTransactionChanges();
+		RunCommitLoop(merge.fork_snapshot, transaction_changes, retry_config, merge_state.get());
+		return;
+	}
+	// the branch changed nothing - only record that it was merged
+	auto &metadata_connection = GetConnection();
+	auto result = metadata_manager->Execute(DuckLakeBranchManager::MergeBookkeepingSql(*this, merge, false));
+	if (result->HasError()) {
+		metadata_connection.Rollback();
+		result->GetErrorObject().Throw(
+		    StringUtil::Format("Failed to merge branch \"%s\" - retry: ", merge.loaded.info.name));
+	}
+	metadata_connection.Commit();
+}
+
 void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
                                         const TransactionChangeInformation &transaction_changes,
-                                        const DuckLakeRetryConfig &retry_config) {
+                                        const DuckLakeRetryConfig &retry_config,
+                                        optional_ptr<DuckLakeBranchMerge> merge) {
 	vector<unique_ptr<SQLStatement>> inlined_inserts;
 	DuckLakeCommitContext context;
 	context.conflict_query_executor = [&](string q) -> unique_ptr<QueryResult> {
@@ -1641,6 +1700,14 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	};
 	context.commit_info = state->commit_info;
 	context.supports_v1_1_metadata = ducklake_catalog.SupportsV1_1Metadata();
+	if (merge) {
+		// a merge starts at the fork snapshot: check conflicts on every attempt and record the merge atomically
+		context.check_conflicts_on_first_attempt = true;
+		context.pre_commit_check = [&](const SnapshotChangeInformation &other_changes) {
+			DuckLakeBranchManager::CheckMerge(*this, *merge, other_changes);
+		};
+		context.extra_commit_sql = DuckLakeBranchManager::MergeBookkeepingSql(*this, *merge, true);
+	}
 	state->Commit(transaction_snapshot, transaction_changes, retry_config, context);
 }
 
