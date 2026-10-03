@@ -114,6 +114,12 @@ struct DuckLakeCommitContext {
 	};
 	//! Author / message / extra info for the snapshot row.
 	DuckLakeSnapshotCommit commit_info;
+	//! Also check for conflicts on the first attempt - a branch merge starts at a snapshot far behind the head
+	bool check_conflicts_on_first_attempt = false;
+	//! Runs after every conflict check with the changes other transactions made; may throw to abort the commit
+	std::function<void(const SnapshotChangeInformation &)> pre_commit_check;
+	//! SQL appended to every attempt's commit batch, with the usual placeholder substitution
+	string extra_commit_sql;
 	//! When true, Commit() skips the post-commit DropEmptySupersededInlinedTables cleanup.
 	bool skip_drop_empty_inlined = false;
 	//! Whether the metadata schema has the >= 1.1-dev1 additions.
@@ -136,6 +142,11 @@ public:
 	void Commit(DuckLakeSnapshot transaction_snapshot, const TransactionChangeInformation &transaction_changes,
 	            const DuckLakeRetryConfig &retry_config, const DuckLakeCommitContext &context);
 
+	SnapshotAndStats CheckForConflicts(DuckLakeSnapshot transaction_snapshot,
+	                                   const TransactionChangeInformation &changes,
+	                                   const std::function<unique_ptr<QueryResult>(string)> &executor,
+	                                   bool supports_v1_1_metadata,
+	                                   const std::function<void(const SnapshotChangeInformation &)> &pre_commit_check);
 	SnapshotAndStats CheckForConflicts(DuckLakeSnapshot transaction_snapshot,
 	                                   const TransactionChangeInformation &changes,
 	                                   const std::function<unique_ptr<QueryResult>(string)> &executor,

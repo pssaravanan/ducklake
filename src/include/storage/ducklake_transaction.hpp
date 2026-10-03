@@ -125,6 +125,10 @@ public:
 	//! Marks a file as written by an earlier branch commit - it is never removed from disk by this transaction
 	void MarkPersisted(const string &path);
 	bool IsPersisted(const string &path) const;
+	//! Removes a loaded data file and its delete files from the change set without touching disk
+	void ForgetFile(TableIndex table_id, const string &path);
+	//! Removes the delete files of a data file from the change set without touching disk
+	void ForgetDeleteFiles(TableIndex table_id, const string &data_file_path);
 
 private:
 	mutable mutex lock;
@@ -231,6 +235,11 @@ public:
 
 	//! Makes this transaction read and write the given branch
 	void SetBranch(idx_t branch_id, string branch_name);
+	//! Makes this transaction's commit merge a branch into main
+	void SetBranchMerge(unique_ptr<DuckLakeBranchMerge> merge);
+	bool IsMergingBranch() const {
+		return merge_state != nullptr;
+	}
 	bool IsOnBranch() const {
 		return branch_id.IsValid();
 	}
@@ -356,7 +365,7 @@ protected:
 
 public:
 	void RunCommitLoop(DuckLakeSnapshot transaction_snapshot, const TransactionChangeInformation &transaction_changes,
-	                   const DuckLakeRetryConfig &retry_config);
+	                   const DuckLakeRetryConfig &retry_config, optional_ptr<DuckLakeBranchMerge> merge = nullptr);
 	void ApplyServerSideCommit(idx_t schema_version);
 	//! Post-commit cleanup of empty inlined-data tables superseded by later schema versions.
 	void DropEmptySupersededInlinedTablesClientSide();
@@ -374,6 +383,7 @@ private:
 	void FlushChanges();
 	DuckLakeSnapshot GetBranchSnapshot();
 	void CommitToBranch();
+	void CommitMerge();
 	void ClearBranchSelection();
 	void FlushNameMapCacheInvalidations();
 	//! Puts back the config options this transaction replaced in the catalog
@@ -434,6 +444,8 @@ private:
 	std::thread::id branch_loading_thread;
 	//! The table of each main data file dropped by this transaction
 	map<idx_t, TableIndex> dropped_file_tables;
+	//! The branch this transaction merges into main on commit (if any)
+	unique_ptr<DuckLakeBranchMerge> merge_state;
 };
 
 } // namespace duckdb

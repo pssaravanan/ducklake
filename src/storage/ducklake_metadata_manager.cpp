@@ -5725,13 +5725,18 @@ void DuckLakeMetadataManager::DeleteSnapshots(const vector<DuckLakeSnapshotInfo>
 	// expiring deletes inlined rows by their snapshot columns so the catalog version must be current
 	GetSnapshot();
 	unique_ptr<QueryResult> result;
-	// a branch may have forked from one of these snapshots since they were selected
+	// a branch may have forked since these snapshots were selected - it needs its fork and everything after it
 	auto active_forks = DuckLakeBranchManager::GetActiveForkSnapshots(transaction);
-	set<idx_t> pinned_snapshots(active_forks.begin(), active_forks.end());
+	optional_idx oldest_fork;
+	for (auto &fork : active_forks) {
+		if (!oldest_fork.IsValid() || fork < oldest_fork.GetIndex()) {
+			oldest_fork = fork;
+		}
+	}
 	// first delete the actual snapshots
 	string snapshot_ids;
 	for (auto &snapshot : snapshots) {
-		if (pinned_snapshots.find(snapshot.id) != pinned_snapshots.end()) {
+		if (oldest_fork.IsValid() && snapshot.id >= oldest_fork.GetIndex()) {
 			continue;
 		}
 		if (!snapshot_ids.empty()) {

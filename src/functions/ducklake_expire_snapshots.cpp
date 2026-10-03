@@ -82,8 +82,8 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 	// we can never delete the most recent snapshot
 	filter = "snapshot_id != (SELECT MAX(snapshot_id) FROM {METADATA_CATALOG}.ducklake_snapshot) AND ";
 	if (DuckLakeBranchManager::HasBranchTables(DuckLakeTransaction::Get(context, catalog))) {
-		// the fork snapshot of every active branch must stay readable
-		filter += "snapshot_id NOT IN (" + DuckLakeBranchManager::ActiveForkSnapshotsQuery() + ") AND ";
+		// an active branch needs its fork snapshot and every snapshot after it, which its merge checks
+		filter += DuckLakeBranchManager::ExpirableSnapshotFilter() + " AND ";
 	}
 	if (has_timestamp) {
 		auto timestamp_filter = DuckLakeTableFunctionUtil::FormatTimestampISO8601(timestamp_t(from_timestamp.value));
